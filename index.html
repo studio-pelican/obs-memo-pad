@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>OBS Memo Pad</title>
+  <link rel="icon" href="favicon.ico" type="image/x-icon">
+  <style>
+    :root {
+      --marker-color: #fce883; /* デフォルトのマーカー色 */
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      background: transparent;
+      overflow: hidden;
+      font-family: sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    
+    #memo-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: auto;
+    }
+
+    .memo {
+      position: absolute;
+      background: rgba(255, 255, 255, 0.85);
+      border-left: 8px solid var(--marker-color);
+      box-shadow: 2px 4px 10px rgba(0, 0, 0, 0.3);
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      min-width: 100px;
+      min-height: 50px;
+      padding: 24px 10px 10px 10px; /* 上部24pxをドラッグ専用領域とする */
+      color: #333;
+    }
+
+    /* ドラッグ領域の可視化やカーソル指定 */
+    .memo::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 24px;
+      cursor: grab;
+      background: transparent;
+    }
+
+    .memo:active::before {
+      cursor: grabbing;
+    }
+
+    .memo-content {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      outline: none;
+      overflow-y: auto;
+      font-size: 16px;
+      line-height: 1.4;
+      cursor: text;
+      user-select: text;
+      -webkit-user-select: text;
+      word-break: break-word;
+      white-space: pre-wrap;
+      position: relative;
+      z-index: 2; /* ::beforeの上へ配置 */
+    }
+    
+    /* スクロールバーの非表示（OBSでは邪魔になるため） */
+    .memo-content::-webkit-scrollbar {
+      display: none;
+    }
+    .memo-content {
+      -ms-overflow-style: none; /* IE, Edge */
+      scrollbar-width: none;    /* Firefox */
+    }
+
+    /* 4隅のリサイズハンドル */
+    .resize-handle {
+      position: absolute;
+      width: 15px;
+      height: 15px;
+      background: transparent;
+      z-index: 3;
+    }
+    .resize-handle.nw { top: -5px; left: -5px; cursor: nwse-resize; }
+    .resize-handle.ne { top: -5px; right: -5px; cursor: nesw-resize; }
+    .resize-handle.sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
+    .resize-handle.se { bottom: -5px; right: -5px; cursor: nwse-resize; }
+  </style>
+</head>
+<body>
+
+<div id="memo-container"></div>
+
+<script>
+  // URLパラメーターでマーカー色を指定 (?color=ff0000 または ?color=red など)
+  const urlParams = new URLSearchParams(window.location.search);
+  const colorParam = urlParams.get('color');
+  if (colorParam) {
+    // 3〜6桁の16進数なら # を先頭に付与
+    const finalColor = /^[0-9A-Fa-f]{3,6}$/.test(colorParam) ? '#' + colorParam : colorParam;
+    document.documentElement.style.setProperty('--marker-color', finalColor);
+  }
+
+  const STORAGE_KEY = 'obs_memos';
+  const MAX_MEMOS = 10;
+  let memos = [];
+  let highestZIndex = 1;
+
+  const container = document.getElementById('memo-container');
+
+  // localStorageからの読み込み
+  function loadMemos() {
+    try {
+      const data = localStorage.getItem(STORAGE_KEY);
+      if (data) {
+        memos = JSON.parse(data);
+        memos.forEach(m => {
+          if (m.zIndex >= highestZIndex) highestZIndex = m.zIndex + 1;
+          createMemoElement(m);
+        });
+      }
+    } catch (e) {
+      console.error('Failed to load memos:', e);
+    }
+  }
+
+  // localStorageへの保存 (軽量なデバウンス処理)
+  let saveTimeout;
+  function saveMemos() {
+    clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(() => {
+      const memoElements = document.querySelectorAll('.memo');
+      memos = Array.from(memoElements).map(el => {
+        const content = el.querySelector('.memo-content');
+        return {
+          id: el.id,
+          x: parseInt(el.style.left) || 0,
+          y: parseInt(el.style.top) || 0,
+          width: parseInt(el.style.width) || 100,
+          height: parseInt(el.style.height) || 50,
+          text: content.innerText || '',
+          zIndex: parseInt(el.style.zIndex) || 1
+        };
+      });
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(memos));
+    }, 100);
+  }
+
+  // ID生成
+  function generateId() {
+    return 'memo-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
+  }
+
+  // メモDOM要素の生成とリスナーのバインド
+  function createMemoElement(data) {
+    const el = document.createElement('div');
+    el.className = 'memo';
+    el.id = data.id;
+    el.style.left = data.x + 'px';
+    el.style.top = data.y + 'px';
+    el.style.width = data.width + 'px';
+    el.style.height = data.height + 'px';
+    el.style.zIndex = data.zIndex;
+
+    const content = document.createElement('div');
+    content.className = 'memo-content';
+    content.contentEditable = 'true';
+    content.innerText = data.text || '';
+    
+    // 中のテキスト領域でのドラッグイベントの親への伝播を防ぐ
+    content.addEventListener('pointerdown', (e) => {
+      e.stopPropagation();
+    });
+
+    el.appendChild(content);
+
+    // 4隅の透明リサイズハンドルの追加
+    const positions = ['nw', 'ne', 'sw', 'se'];
+    positions.forEach(pos => {
+      const handle = document.createElement('div');
+      handle.className = `resize-handle ${pos}`;
+      handle.dataset.pos = pos;
+      el.appendChild(handle);
+    });
+
+    // アクティブ時に最前面へ
+    el.addEventListener('pointerdown', () => {
+      el.style.zIndex = highestZIndex++;
+    });
+
+    // それぞれの操作設定
+    setupDragging(el);
+    setupResizing(el);
+
+    // サイズやテキスト、位置の変更を監視し自動保存
+    const ro = new ResizeObserver(() => saveMemos());
+    ro.observe(el);
+
+    const mo = new MutationObserver(() => saveMemos());
+    mo.observe(content, { characterData: true, childList: true, subtree: true });
+    mo.observe(el, { attributes: true, attributeFilter: ['style'] }); // z-indexやleft/topの変更検知に対応
+
+    // 右クリックによる削除
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (confirm('このメモを削除しますか？')) {
+        ro.disconnect();
+        mo.disconnect();
+        el.remove();
+        saveMemos();
+      }
+    });
+
+    container.appendChild(el);
+  }
+
+  // コンテナのダブルクリックで新規生成
+  container.addEventListener('dblclick', (e) => {
+    if (e.target !== container) return; // メモリの上ならキャンセル
+    if (document.querySelectorAll('.memo').length >= MAX_MEMOS) {
+      alert(`メモは最大${MAX_MEMOS}個までです。`);
+      return;
+    }
+    
+    // 表示の初期値を決定
+    const newMemo = {
+      id: generateId(),
+      x: e.clientX,
+      y: e.clientY,
+      width: 200,
+      height: 100,
+      text: '',
+      zIndex: highestZIndex++
+    };
+    
+    createMemoElement(newMemo);
+    saveMemos();
+    
+    // 同時にフォーカスし入力待ち状態にする
+    setTimeout(() => {
+      const el = document.getElementById(newMemo.id);
+      if (el) el.querySelector('.memo-content').focus();
+    }, 10);
+  });
+
+  // ドラッグによる移動ロジック
+  function setupDragging(el) {
+    let isDragging = false;
+    let startX, startY, initialLeft, initialTop;
+
+    el.addEventListener('pointerdown', (e) => {
+      if (e.target.classList.contains('resize-handle')) return;
+      if (e.target.classList.contains('memo-content')) return;
+
+      isDragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      initialLeft = parseInt(el.style.left) || 0;
+      initialTop = parseInt(el.style.top) || 0;
+      el.setPointerCapture(e.pointerId);
+    });
+
+    el.addEventListener('pointermove', (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      el.style.left = (initialLeft + dx) + 'px';
+      el.style.top = (initialTop + dy) + 'px';
+    });
+
+    el.addEventListener('pointerup', (e) => {
+      if (!isDragging) return;
+      isDragging = false;
+      el.releasePointerCapture(e.pointerId);
+    });
+  }
+
+  // 4隅のドラッグによるリサイズロジック
+  function setupResizing(el) {
+    const handles = el.querySelectorAll('.resize-handle');
+    handles.forEach(handle => {
+      let isResizing = false;
+      let startX, startY, initialWidth, initialHeight, initialLeft, initialTop;
+      let pos = handle.dataset.pos;
+
+      handle.addEventListener('pointerdown', (e) => {
+        e.stopPropagation();
+        isResizing = true;
+        startX = e.clientX;
+        startY = e.clientY;
+        initialWidth = parseInt(el.style.width) || 0;
+        initialHeight = parseInt(el.style.height) || 0;
+        initialLeft = parseInt(el.style.left) || 0;
+        initialTop = parseInt(el.style.top) || 0;
+        handle.setPointerCapture(e.pointerId);
+      });
+
+      handle.addEventListener('pointermove', (e) => {
+        if (!isResizing) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        
+        let newWidth = initialWidth;
+        let newHeight = initialHeight;
+        let newLeft = initialLeft;
+        let newTop = initialTop;
+
+        const minW = 100, minH = 50;
+
+        // 東西南北それぞれの変化計算
+        if (pos.includes('e')) newWidth = initialWidth + dx;
+        if (pos.includes('w')) {
+          newWidth = initialWidth - dx;
+          if (newWidth >= minW) newLeft = initialLeft + dx;
+        }
+        if (pos.includes('s')) newHeight = initialHeight + dy;
+        if (pos.includes('n')) {
+          newHeight = initialHeight - dy;
+          if (newHeight >= minH) newTop = initialTop + dy;
+        }
+
+        // 最小サイズの制限を適用
+        if (newWidth >= minW) {
+          el.style.width = newWidth + 'px';
+          el.style.left = newLeft + 'px';
+        }
+        if (newHeight >= minH) {
+          el.style.height = newHeight + 'px';
+          el.style.top = newTop + 'px';
+        }
+      });
+
+      handle.addEventListener('pointerup', (e) => {
+        if (!isResizing) return;
+        isResizing = false;
+        handle.releasePointerCapture(e.pointerId);
+      });
+    });
+  }
+
+  // 初期化開始
+  window.addEventListener('DOMContentLoaded', loadMemos);
+</script>
+</body>
+</html>
