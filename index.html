@@ -7,6 +7,16 @@
   <style>
     :root {
       --marker-color: #fce883; /* デフォルトのマーカー色 */
+      --memo-bg: rgba(255, 255, 255, 0.85);
+      --text-color: #333;
+      --dialog-bg: white;
+      --dialog-btn-cancel-bg: #e0e0e0;
+    }
+    body.dark {
+      --memo-bg: rgba(40, 40, 40, 0.85);
+      --text-color: #f5f5f5;
+      --dialog-bg: #333;
+      --dialog-btn-cancel-bg: #555;
     }
     body {
       margin: 0;
@@ -31,7 +41,7 @@
 
     .memo {
       position: absolute;
-      background: rgba(255, 255, 255, 0.85);
+      background: var(--memo-bg);
       border-left: 8px solid var(--marker-color);
       box-shadow: 2px 4px 10px rgba(0, 0, 0, 0.3);
       box-sizing: border-box;
@@ -40,7 +50,7 @@
       min-width: 100px;
       min-height: 50px;
       padding: 24px 10px 10px 10px; /* 上部24pxをドラッグ専用領域とする */
-      color: #333;
+      color: var(--text-color);
     }
 
     /* ドラッグ領域の可視化やカーソル指定 */
@@ -97,13 +107,95 @@
     .resize-handle.ne { top: -5px; right: -5px; cursor: nesw-resize; }
     .resize-handle.sw { bottom: -5px; left: -5px; cursor: nesw-resize; }
     .resize-handle.se { bottom: -5px; right: -5px; cursor: nwse-resize; }
+
+    /* カスタムダイアログ用スタイル */
+    #custom-dialog-overlay {
+      display: none;
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.4);
+      z-index: 9999;
+      justify-content: center;
+      align-items: center;
+      pointer-events: auto;
+    }
+    .custom-dialog {
+      background: var(--dialog-bg);
+      padding: 24px 32px;
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+      text-align: center;
+    }
+    .custom-dialog-message {
+      margin-bottom: 24px;
+      font-size: 16px;
+      color: var(--text-color);
+    }
+    .custom-dialog-buttons button {
+      padding: 8px 24px;
+      margin: 0 8px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: bold;
+      transition: opacity 0.2s;
+    }
+    .custom-btn-ok {
+      background: var(--marker-color);
+      color: #333;
+    }
+    .custom-btn-cancel {
+      background: var(--dialog-btn-cancel-bg);
+      color: var(--text-color);
+    }
+    .custom-btn-ok:hover, .custom-btn-cancel:hover {
+      opacity: 0.8;
+    }
   </style>
 </head>
 <body>
 
 <div id="memo-container"></div>
 
+<!-- カスタムダイアログ -->
+<div id="custom-dialog-overlay">
+  <div class="custom-dialog">
+    <div class="custom-dialog-message" id="custom-dialog-text"></div>
+    <div class="custom-dialog-buttons">
+      <button class="custom-btn-cancel" id="custom-btn-cancel">キャンセル</button>
+      <button class="custom-btn-ok" id="custom-btn-ok">OK</button>
+    </div>
+  </div>
+</div>
+
 <script>
+  // カスタムダイアログ表示関数（Promiseで結果を返す）
+  function showCustomDialog(message, isConfirm) {
+    return new Promise((resolve) => {
+      const overlay = document.getElementById('custom-dialog-overlay');
+      const text = document.getElementById('custom-dialog-text');
+      const btnOk = document.getElementById('custom-btn-ok');
+      const btnCancel = document.getElementById('custom-btn-cancel');
+
+      text.innerText = message;
+      btnCancel.style.display = isConfirm ? 'inline-block' : 'none';
+      overlay.style.display = 'flex';
+
+      const cleanup = () => {
+        overlay.style.display = 'none';
+        btnOk.removeEventListener('click', onOk);
+        btnCancel.removeEventListener('click', onCancel);
+      };
+
+      const onOk = () => { cleanup(); resolve(true); };
+      const onCancel = () => { cleanup(); resolve(false); };
+
+      btnOk.addEventListener('click', onOk);
+      btnCancel.addEventListener('click', onCancel);
+    });
+  }
+
   // URLパラメーターでマーカー色を指定 (?color=ff0000 または ?color=red など)
   const urlParams = new URLSearchParams(window.location.search);
   const colorParam = urlParams.get('color');
@@ -111,6 +203,12 @@
     // 3〜6桁の16進数なら # を先頭に付与
     const finalColor = /^[0-9A-Fa-f]{3,6}$/.test(colorParam) ? '#' + colorParam : colorParam;
     document.documentElement.style.setProperty('--marker-color', finalColor);
+  }
+
+  // URLパラメーターでテーマを指定 (?theme=dark)
+  const themeParam = urlParams.get('theme');
+  if (themeParam === 'dark') {
+    document.body.classList.add('dark');
   }
 
   const STORAGE_KEY = 'obs_memos';
@@ -213,9 +311,10 @@
     mo.observe(el, { attributes: true, attributeFilter: ['style'] }); // z-indexやleft/topの変更検知に対応
 
     // 右クリックによる削除
-    el.addEventListener('contextmenu', (e) => {
+    el.addEventListener('contextmenu', async (e) => {
       e.preventDefault();
-      if (confirm('このメモを削除しますか？')) {
+      const isOk = await showCustomDialog('このメモを削除しますか？', true);
+      if (isOk) {
         ro.disconnect();
         mo.disconnect();
         el.remove();
@@ -227,10 +326,10 @@
   }
 
   // コンテナのダブルクリックで新規生成
-  container.addEventListener('dblclick', (e) => {
+  container.addEventListener('dblclick', async (e) => {
     if (e.target !== container) return; // メモリの上ならキャンセル
     if (document.querySelectorAll('.memo').length >= MAX_MEMOS) {
-      alert(`メモは最大${MAX_MEMOS}個までです。`);
+      await showCustomDialog(`メモは最大${MAX_MEMOS}個までです。`, false);
       return;
     }
     
